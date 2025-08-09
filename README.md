@@ -49,7 +49,7 @@ Create a `config.ps1` file containing all environment variables. Update values a
 
 # All configuration variables in one place
 $RG_NAME = "az-204-msal-obo-lab-rg"
-$LOCATION = "eastus"
+$LOCATION = "westus"
 
 # App Registration Names
 $WEB_APP_NAME = "ContosoWebApp"
@@ -63,8 +63,8 @@ $API_LOCAL_URL = "https://localhost:7001"
 $WEB_REDIRECT_URI = "$WEB_APP_LOCAL_URL/signin-oidc"
 
 # Azure App Service Names (must be globally unique)
-$WEB_APP_SERVICE_NAME = "contoso-web-app-$(Get-Random -Minimum 1000 -Maximum 9999)"
-$API_APP_SERVICE_NAME = "contoso-api-app-$(Get-Random -Minimum 1000 -Maximum 9999)"
+$WEB_APP_SERVICE_NAME = "contoso-web-app-20250809AM" # ensure uniqueness
+$API_APP_SERVICE_NAME = "contoso-api-app-20250809AM" # ensure uniqueness
 
 # App Service Plan
 $APP_SERVICE_PLAN = "msal-obo-plan"
