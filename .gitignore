@@ -1,0 +1,47 @@
+# Azure generated configuration files with secrets
+app-config.ps1
+*.secret.ps1
+*-secrets.ps1
+
+# Azure CLI output files that might contain sensitive data
+*.json.secret
+temp-*.json
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+
+# Azure Functions
+local.settings.json
+
+# Visual Studio / VS Code
+.vs/
+.vscode/settings.json
+bin/
+obj/
+*.user
+*.suo
+
+# .NET
+*.dll
+*.pdb
+packages/
+
+# Node.js (if you add any)
+node_modules/
+npm-debug.log*
+
+# Logs
+*.log
+logs/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+temp/
+tmp/
+*.tmp

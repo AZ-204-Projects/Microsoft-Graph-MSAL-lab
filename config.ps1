@@ -1,4 +1,6 @@
 # config.ps1
+# Owner Object ID (for App Registration ownership assignments)
+$OWNER_OBJECT_ID = (az ad signed-in-user show --query id -o tsv)
 
 # All configuration variables in one place
 $RG_NAME = "az-204-msal-obo-lab-rg"
@@ -24,6 +26,7 @@ $APP_SERVICE_PLAN = "msal-obo-plan"
 
 # Custom API Scope
 $API_SCOPE_NAME = "User.Write"
+$API_SCOPE_GUID = "c1cf1e6e-893c-4b5e-9d56-5e2a6e8c2667"   # ← Generate once, then keep stable
 
 # Project Folders
 $WEB_PROJECT_FOLDER = "ContosoWebApp"
@@ -45,4 +48,6 @@ Write-Host "API App Name: $API_APP_NAME"
 Write-Host "Web App Service: $WEB_APP_SERVICE_NAME"
 Write-Host "API App Service: $API_APP_SERVICE_NAME"
 Write-Host "Subscription ID: $SUBSCRIPTION_ID"
+Write-Host "API Scope GUID: $API_SCOPE_GUID"
+Write-Host "Owner Object ID: $OWNER_OBJECT_ID"
 Write-Host "==============================" -ForegroundColor Green
