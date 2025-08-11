@@ -3,9 +3,17 @@ app-config.ps1
 *.secret.ps1
 *-secrets.ps1
 
+# Temporary Azure CLI files
+scopes.json
+temp-*.json
+*.tmp.json
+temp-scope-update.json
+
+# PowerShell temporary files
+*.ps1.tmp
+
 # Azure CLI output files that might contain sensitive data
 *.json.secret
-temp-*.json
 
 # Environment files
 .env
