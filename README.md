@@ -46,6 +46,8 @@ Create a `config.ps1` file containing all environment variables. Update values a
 
 ```powershell
 # config.ps1
+# Owner Object ID (for App Registration ownership assignments)
+$OWNER_OBJECT_ID = (az ad signed-in-user show --query id -o tsv)
 
 # All configuration variables in one place
 $RG_NAME = "az-204-msal-obo-lab-rg"
@@ -71,6 +73,7 @@ $APP_SERVICE_PLAN = "msal-obo-plan"
 
 # Custom API Scope
 $API_SCOPE_NAME = "User.Write"
+$API_SCOPE_GUID = "c1cf1e6e-893c-4b5e-9d56-5e2a6e8c2667"   # ← Generate once, then keep stable
 
 # Project Folders
 $WEB_PROJECT_FOLDER = "ContosoWebApp"
@@ -92,8 +95,117 @@ Write-Host "API App Name: $API_APP_NAME"
 Write-Host "Web App Service: $WEB_APP_SERVICE_NAME"
 Write-Host "API App Service: $API_APP_SERVICE_NAME"
 Write-Host "Subscription ID: $SUBSCRIPTION_ID"
+Write-Host "API Scope GUID: $API_SCOPE_GUID"
+Write-Host "Owner Object ID: $OWNER_OBJECT_ID"
 Write-Host "==============================" -ForegroundColor Green
 ```
+
+Include graph-permissions.ps1 for permission constants.
+
+> Source: https://docs.microsoft.com/en-us/graph/permissions-reference.
+
+```powershell
+# graph-permissions.ps1
+# Microsoft Graph Permission Constants
+# Source: https://docs.microsoft.com/en-us/graph/permissions-reference
+
+# Microsoft Graph Service Principal ID
+$MICROSOFT_GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
+
+# === DELEGATED PERMISSIONS (Scope) ===
+$GRAPH_DELEGATED = @{
+    # User Permissions
+    "User.Read"                 = "e1fe6dd8-ba31-4d61-89e7-88639da4683d"
+    "User.ReadWrite"            = "b4e74841-8e56-480b-be8b-910348b18b4c"
+    "User.ReadBasic.All"        = "204e0828-b5ca-4ad8-b9f3-f32a958e7cc4"
+    
+    # Group Permissions
+    "Group.Read.All"            = "5f8c59db-677d-491f-a6b8-5f174b11ec1d"
+    "Group.ReadWrite.All"       = "4e46008b-f24c-477d-8fff-7bb4ec7aafe0"
+    
+    # Directory Permissions
+    "Directory.Read.All"        = "06da0dbc-49e2-44d2-8312-53f166ab848a"
+    "Directory.ReadWrite.All"   = "c5366453-9fb0-48a5-a156-24f0c49a4b84"
+    
+    # Mail Permissions
+    "Mail.Read"                 = "570282fd-fa5c-430d-a7fd-fc8dc98a9dca"
+    "Mail.ReadWrite"            = "024d486e-b451-40bb-833d-3e66d98c5c73"
+    
+    # Calendar Permissions
+    "Calendars.Read"            = "465a38f9-76ea-45b9-9f34-9e8b0d4b0b42"
+    "Calendars.ReadWrite"       = "1ec239c2-d7c9-4623-a91a-a9775856bb36"
+}
+
+# === APPLICATION PERMISSIONS (Role) ===
+$GRAPH_APPLICATION = @{
+    # User Permissions
+    "User.Read.All"             = "df021288-bdef-4463-88db-98f22de89214"
+    "User.ReadWrite.All"        = "741f803b-c850-494e-b5df-cde7c675a1ca"
+    
+    # Group Permissions
+    "Group.Read.All"            = "5b567255-7703-4780-807c-7be8301ae99b"
+    "Group.ReadWrite.All"       = "62a82d76-70ea-41e2-9197-370581804d09"
+    
+    # Directory Permissions
+    "Directory.Read.All"        = "7ab1d382-f21e-4acd-a863-ba3e13f7da61"
+    "Directory.ReadWrite.All"   = "19dbc75e-c2e2-444c-a770-ec69d8559fc7"
+    
+    # Application Permissions
+    "Application.Read.All"      = "9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30"
+    "Application.ReadWrite.All" = "1bfefb4e-e0b5-418b-a88f-73c46d2cc8e9"
+}
+
+# === HELPER FUNCTIONS ===
+function Add-GraphDelegatedPermission {
+    param(
+        [string]$AppId,
+        [string]$PermissionName
+    )
+    
+    if (-not $GRAPH_DELEGATED.ContainsKey($PermissionName)) {
+        throw "Unknown delegated permission: $PermissionName. Available: $($GRAPH_DELEGATED.Keys -join ', ')"
+    }
+    
+    $permissionGuid = $GRAPH_DELEGATED[$PermissionName]
+    Write-Host "Adding delegated permission: $PermissionName ($permissionGuid)"
+    
+    az ad app permission add --id $AppId --api $MICROSOFT_GRAPH_APP_ID --api-permissions "$permissionGuid=Scope"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to add delegated permission: $PermissionName" }
+}
+
+function Add-GraphApplicationPermission {
+    param(
+        [string]$AppId,
+        [string]$PermissionName
+    )
+    
+    if (-not $GRAPH_APPLICATION.ContainsKey($PermissionName)) {
+        throw "Unknown application permission: $PermissionName. Available: $($GRAPH_APPLICATION.Keys -join ', ')"
+    }
+    
+    $permissionGuid = $GRAPH_APPLICATION[$PermissionName]
+    Write-Host "Adding application permission: $PermissionName ($permissionGuid)"
+    
+    az ad app permission add --id $AppId --api $MICROSOFT_GRAPH_APP_ID --api-permissions "$permissionGuid=Role"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to add application permission: $PermissionName" }
+}
+
+# === USAGE EXAMPLES ===
+<#
+# In your main script:
+. .\graph-permissions.ps1
+
+# Add delegated permissions
+Add-GraphDelegatedPermission -AppId $webAppId -PermissionName "User.ReadWrite"
+Add-GraphDelegatedPermission -AppId $webAppId -PermissionName "Group.Read.All"
+
+# Add application permissions  
+Add-GraphApplicationPermission -AppId $apiAppId -PermissionName "User.Read.All"
+
+# Or use the constants directly:
+az ad app permission add --id $webAppId --api $MICROSOFT_GRAPH_APP_ID --api-permissions "$($GRAPH_DELEGATED['User.ReadWrite'])=Scope"
+#>```
+
 
 ---
 
@@ -105,83 +217,144 @@ Automate the creation of both app registrations with proper permissions and scop
 # 01-create-app-registrations.ps1
 
 . .\config.ps1
+. .\graph-permissions.ps1
 
 Write-Host "Creating App Registrations..." -ForegroundColor Yellow
 
-# Create API App Registration first (to get App ID for scope)
-Write-Host "Creating API App Registration: $API_APP_NAME"
+# --- API App Registration ---
+Write-Host "Creating or updating API App Registration: $API_APP_NAME"
+
+# Delete any existing app registration with same display name (for idempotency)
+$existingApiApp = az ad app list --display-name "$API_APP_DISPLAY_NAME" --query "[0].appId" -o tsv
+if ($existingApiApp) {
+    Write-Host "Deleting existing API app registration $existingApiApp"
+    az ad app delete --id $existingApiApp
+}
+
+# Create API App Registration
 $apiAppId = az ad app create --display-name "$API_APP_DISPLAY_NAME" --query appId -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $apiAppId) { throw "Failed to create API app registration" }
+az ad app owner add --id $apiAppId --owner-object-id $OWNER_OBJECT_ID
+if ($LASTEXITCODE -ne 0 ) { throw "Failed to create API owner" }
 
-if (-not $apiAppId) {
-    Write-Error "Failed to create API app registration"
-    exit 1
-}
+Read-Host "Check Azure Portal or CLI to confirm Entra ID app registration of $apiAppId, then press Enter to continue..."
 
-Write-Host "API App ID: $apiAppId"
+# Create a client secret for API
+$apiSecret = az ad app credential reset --id $apiAppId --append --query password -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $apiSecret) { throw "Failed to create API app secret" }
 
-# Generate a client secret for the API
-$apiSecret = az ad app credential reset --id $apiAppId --query password -o tsv
-Write-Host "API Secret generated (store securely)"
+Read-Host "Check Azure Portal or CLI to confirm client secret starts with: $($apiSecret.Substring(0,3)), then press Enter to continue..."
 
-# Create the API scope URI
+# Add API scope (User.Write) to API app registration
 $apiScopeUri = "api://$apiAppId"
+az ad app update --id $apiAppId --identifier-uris $apiScopeUri
+if ($LASTEXITCODE -ne 0) { throw "Failed to set API identifier URI" }
+Read-Host "Check Azure Portal or CLI to confirm Application ID URI is $apiScopeUri, then press Enter to continue..."
 
-# Add Application ID URI to the API app
-az ad app update --id $apiAppId --identifier-uris "$apiScopeUri"
+# Get the object ID of your app registration
+$appObjectId = az ad app show --id $apiAppId --query id -o tsv
 
-# Expose API scope for the API app
-$scopeJson = @"
-{
-    "adminConsentDescription": "Allow the application to write user data on behalf of the signed-in user",
-    "adminConsentDisplayName": "Write user data",
-    "id": "$(New-Guid)",
-    "isEnabled": true,
-    "type": "User",
-    "userConsentDescription": "Allow the application to write your user data on your behalf",
-    "userConsentDisplayName": "Write your user data",
-    "value": "$API_SCOPE_NAME"
+# Build the JSON for the new scope
+$scope = @{
+    id = $API_SCOPE_GUID
+    type = "User"
+    value = $API_SCOPE_NAME
+    adminConsentDisplayName = "Update user profile"
+    adminConsentDescription = "Allows updating user profile via the API"
+    isEnabled = $true
 }
-"@
 
-$scopeFile = "api-scope.json"
-$scopeJson | Out-File -FilePath $scopeFile -Encoding UTF8
+$bodyObject = @{
+    api = @{
+        oauth2PermissionScopes = @($scope)
+    }
+}
 
-az ad app update --id $apiAppId --set oauth2Permissions=@$scopeFile
-Remove-Item $scopeFile
+# Convert to JSON and save to a temporary file
+$body = $bodyObject | ConvertTo-Json -Compress -Depth 5
+$tempFile = "temp-scope-update.json"
+$body | Out-File -FilePath $tempFile -Encoding UTF8 -NoNewline
+
+Write-Host "JSON Body: $body"
+
+# Use the file-based approach for the REST call
+az rest --method PATCH `
+  --url "https://graph.microsoft.com/v1.0/applications/$appObjectId" `
+  --headers "Content-Type=application/json" `
+  --body "@$tempFile"
+
+# Clean up the temporary file
+Remove-Item $tempFile -ErrorAction SilentlyContinue
+if ($LASTEXITCODE -ne 0) { 
+    throw "Failed to add API scope" 
+}
+
+Read-Host "Check Azure Portal or CLI to confirm app permissions updated, then press Enter to continue..."
+
+# --- Web App Registration ---
+Write-Host "Creating or updating Web App Registration: $WEB_APP_NAME"
+
+$existingWebApp = az ad app list --display-name "$WEB_APP_DISPLAY_NAME" --query "[0].appId" -o tsv
+if ($existingWebApp) {
+    Write-Host "Deleting existing Web app registration $existingWebApp"
+    az ad app delete --id $existingWebApp
+}
 
 # Create Web App Registration
-Write-Host "Creating Web App Registration: $WEB_APP_NAME"
 $webAppId = az ad app create --display-name "$WEB_APP_DISPLAY_NAME" --query appId -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $webAppId) { throw "Failed to create Web app registration" }
 
-if (-not $webAppId) {
-    Write-Error "Failed to create web app registration"
-    exit 1
-}
+az ad app owner add --id $webAppId --owner-object-id $OWNER_OBJECT_ID
+if ($LASTEXITCODE -ne 0 ) { throw "Failed to create Web app owner" }
 
-Write-Host "Web App ID: $webAppId"
+Read-Host "Check Azure Portal or CLI to confirm Entra ID app registration of $webAppId, then press Enter to continue..."
 
-# Generate a client secret for the Web App
-$webSecret = az ad app credential reset --id $webAppId --query password -o tsv
-Write-Host "Web Secret generated (store securely)"
+# Create a client secret for Web
+$webSecret = az ad app credential reset --id $webAppId --append --query password -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $webSecret) { throw "Failed to create Web app secret" }
 
-# Add redirect URI to Web App
+Read-Host "Check Azure Portal or CLI to confirm client secret starts with: $($webSecret.Substring(0,3)), then press Enter to continue..."
+
+# Add redirect URIs
 az ad app update --id $webAppId --web-redirect-uris "$WEB_REDIRECT_URI"
+if ($LASTEXITCODE -ne 0) { throw "Failed to update Web app redirect URIs" }
+Read-Host "Check Azure Portal or CLI to confirm Application ID URI is $WEB_REDIRECT_URI, then press Enter to continue..."
 
-# Add API permissions to Web App (custom scope)
-$apiPermissionId = (az ad app show --id $apiAppId --query "oauth2Permissions[0].id" -o tsv)
-az ad app permission add --id $webAppId --api $apiAppId --api-permissions "$apiPermissionId=Scope"
+# --- Permissions: Grant Web App permission to call API (custom scope) and Microsoft Graph ---
+Write-Host "Configuring Web App API permissions..."
 
-# Add Microsoft Graph permissions to API app
-az ad app permission add --id $apiAppId --api 00000003-0000-0000-c000-000000000000 --api-permissions e1fe6dd8-ba31-4d61-89e7-88639da4683d=Scope
+# Add permission for custom API scope
+az ad app permission add --id $webAppId --api $apiAppId --api-permissions "$API_SCOPE_GUID=Scope"
+if ($LASTEXITCODE -ne 0) { throw "Failed to add API permission to Web app" }
+Read-Host "Check Azure Portal or CLI to confirm Add permission for custom API scope, then press Enter to continue..."
 
-# Grant admin consent for both apps
-Write-Host "Granting admin consent for Web App..."
-az ad app permission admin-consent --id $webAppId
+# Add MS Graph User.ReadWrite permission
+az ad app permission add --id $webAppId --api $MICROSOFT_GRAPH_APP_ID --api-permissions "$($GRAPH_DELEGATED['User.ReadWrite'])=Scope"
+if ($LASTEXITCODE -ne 0) { throw "Failed to add Graph permission to Web app" }
+Read-Host "Check Azure Portal: Web App > API permissions - confirm 'Microsoft Graph User.ReadWrite' is listed, then press Enter to continue..."
 
-Write-Host "Granting admin consent for API App..."
-az ad app permission admin-consent --id $apiAppId
+# skip this section for now. 
+# Grant admin consent for all permissions (if you have permissions to do so)  
+# Write-Host "Granting admin consent for Web app permissions (requires admin)..."
+# az ad app permission admin-consent --id $webAppId
+# if ($LASTEXITCODE -ne 0) { throw "Failed Granting admin consent for Web app permissions" }
+# Read-Host "Check Azure Portal: Web App > API permissions - confirm Status shows 'Granted' (green checkmarks), then press Enter to continue..."
 
-# Save configuration to file for other scripts
+# --- Expose API permissions for the API App ---
+Write-Host "Exposing API permissions on API app..."
+
+# Add MS Graph delegated permissions to API app (so it can acquire tokens OBO)
+az ad app permission add --id $apiAppId --api $MICROSOFT_GRAPH_APP_ID --api-permissions "$($GRAPH_DELEGATED['User.ReadWrite'])=Scope"
+if ($LASTEXITCODE -ne 0) { throw "Failed Add MS Graph delegated permissions to API app (so it can acquire tokens OBO)" }
+Read-Host "Check Azure Portal: API App > API permissions - confirm 'Microsoft Graph User.ReadWrite' is listed, then press Enter to continue..."
+
+# skip this section for now. 
+# Grant admin consent for API app (so OBO works)
+# az ad app permission admin-consent --id $apiAppId
+# if ($LASTEXITCODE -ne 0) { throw "Failed Grant admin consent for API app (so OBO works)" }
+# Read-Host "Check Azure Portal: API App > API permissions - confirm Status shows 'Granted' for Microsoft Graph permission, then press Enter to continue..."
+
+# --- Output configuration ---
 $configOutput = @"
 # Generated App Registration IDs
 `$WEB_APP_ID = "$webAppId"
@@ -191,12 +364,11 @@ $configOutput = @"
 `$API_SCOPE_URI = "$apiScopeUri/$API_SCOPE_NAME"
 `$TENANT_ID = "$((az account show --query tenantId -o tsv))"
 "@
-
 $configOutput | Out-File -FilePath "app-config.ps1" -Encoding UTF8
+if ($LASTEXITCODE -ne 0) { throw "Failed Output configuration" }
 
 Write-Host "App registrations created successfully!" -ForegroundColor Green
-Write-Host "Configuration saved to app-config.ps1" -ForegroundColor Green
-```
+Write-Host "Configuration saved to app-config.ps1" -ForegroundColor Green```
 
 ---
 
