@@ -204,8 +204,8 @@ Add-GraphApplicationPermission -AppId $apiAppId -PermissionName "User.Read.All"
 
 # Or use the constants directly:
 az ad app permission add --id $webAppId --api $MICROSOFT_GRAPH_APP_ID --api-permissions "$($GRAPH_DELEGATED['User.ReadWrite'])=Scope"
-#>```
-
+#>
+```
 
 ---
 
@@ -368,7 +368,8 @@ $configOutput | Out-File -FilePath "app-config.ps1" -Encoding UTF8
 if ($LASTEXITCODE -ne 0) { throw "Failed Output configuration" }
 
 Write-Host "App registrations created successfully!" -ForegroundColor Green
-Write-Host "Configuration saved to app-config.ps1" -ForegroundColor Green```
+Write-Host "Configuration saved to app-config.ps1" -ForegroundColor Green
+```
 
 ---
 
