@@ -215,160 +215,344 @@ Automate the creation of both app registrations with proper permissions and scop
 
 ```powershell
 # 01-create-app-registrations.ps1
+# Improved version with better error handling, admin consent, and reduced manual steps
 
 . .\config.ps1
 . .\graph-permissions.ps1
 
-Write-Host "Creating App Registrations..." -ForegroundColor Yellow
-
-# --- API App Registration ---
-Write-Host "Creating or updating API App Registration: $API_APP_NAME"
-
-# Delete any existing app registration with same display name (for idempotency)
-$existingApiApp = az ad app list --display-name "$API_APP_DISPLAY_NAME" --query "[0].appId" -o tsv
-if ($existingApiApp) {
-    Write-Host "Deleting existing API app registration $existingApiApp"
-    az ad app delete --id $existingApiApp
+Write-Host "Retrieving tenant information..." -ForegroundColor Yellow
+$tenantDisplayName = az rest --method GET --url "https://graph.microsoft.com/v1.0/organization" --query "value[0].displayName" -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $tenantDisplayName -or $tenantDisplayName -eq "") {
+    Write-Warning "Could not retrieve tenant display name, using generic placeholder"
+    $tenantDisplayName = "[Your Organization]"
+} else {
+    Write-Host "Tenant: $tenantDisplayName" -ForegroundColor Green
 }
 
-# Create API App Registration
+Write-Host "Creating App Registrations..." -ForegroundColor Yellow
+
+# Function to wait for app registration propagation
+function Wait-ForAppRegistration {
+    param([string]$AppId, [string]$AppName)
+    
+    Write-Host "Waiting for $AppName registration to propagate..." -ForegroundColor Yellow
+    $retries = 0
+    $maxRetries = 30
+    
+    do {
+        Start-Sleep -Seconds 2
+        $app = az ad app show --id $AppId 2>$null
+        $retries++
+        
+        if ($app) {
+            Write-Host "$AppName registration confirmed" -ForegroundColor Green
+            return $true
+        }
+        
+        if ($retries -ge $maxRetries) {
+            throw "Timeout waiting for $AppName registration to propagate"
+        }
+    } while ($true)
+}
+
+# Function to check if user has admin consent permissions and tenant license level
+function Test-AdminConsentPermissions {
+    try {
+        # Try to get directory role memberships for current user
+        $roles = az rest --method GET --url "https://graph.microsoft.com/v1.0/me/memberOf" --query "value[?contains(@odata.type, 'directoryRole')].displayName" -o tsv 2>$null
+        
+        $hasAdminRole = $roles -match "Global Administrator|Application Administrator|Cloud Application Administrator"
+        
+        # Check if tenant has premium features (indicator of license level)
+        $tenantInfo = az rest --method GET --url "https://graph.microsoft.com/v1.0/organization" --query "value[0]" 2>$null | ConvertFrom-Json
+        $hasPremiumLicense = $tenantInfo.assignedPlans | Where-Object { $_.servicePlanId -match "41781fb2-bc02-4b7c-bd55-b576c07bb09d|eec0eb4f-6444-4f95-aba0-50c24d67f998" }
+        
+        # For Azure AD Free tenants, recommend manual consent even with admin permissions
+        if (-not $hasPremiumLicense -and $hasAdminRole) {
+            Write-Host "Note: Azure AD Free tenant detected. Manual consent recommended for reliability." -ForegroundColor Yellow
+            return $false
+        }
+        
+        return $hasAdminRole
+    }
+    catch {
+        return $false
+    }
+}
+
+# --- CLEANUP EXISTING REGISTRATIONS ---
+Write-Host "Cleaning up any existing app registrations..." -ForegroundColor Yellow
+
+$existingApiApp = az ad app list --display-name "$API_APP_DISPLAY_NAME" --query "[0].appId" -o tsv 2>$null
+if ($existingApiApp -and $existingApiApp -ne "") {
+    Write-Host "Deleting existing API app registration: $existingApiApp"
+    az ad app delete --id $existingApiApp
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to delete existing API app registration" }
+}
+
+$existingWebApp = az ad app list --display-name "$WEB_APP_DISPLAY_NAME" --query "[0].appId" -o tsv 2>$null
+if ($existingWebApp -and $existingWebApp -ne "") {
+    Write-Host "Deleting existing Web app registration: $existingWebApp"
+    az ad app delete --id $existingWebApp
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to delete existing Web app registration" }
+}
+
+# Wait for deletions to propagate
+Start-Sleep -Seconds 5
+
+# --- CREATE API APP REGISTRATION ---
+Write-Host "Creating API App Registration: $API_APP_DISPLAY_NAME" -ForegroundColor Cyan
+
 $apiAppId = az ad app create --display-name "$API_APP_DISPLAY_NAME" --query appId -o tsv
-if ($LASTEXITCODE -ne 0 -or -not $apiAppId) { throw "Failed to create API app registration" }
+if ($LASTEXITCODE -ne 0 -or -not $apiAppId -or $apiAppId -eq "") { 
+    throw "Failed to create API app registration" 
+}
+
+Write-Host "API App ID: $apiAppId" -ForegroundColor Green
+
+# Add owner
 az ad app owner add --id $apiAppId --owner-object-id $OWNER_OBJECT_ID
-if ($LASTEXITCODE -ne 0 ) { throw "Failed to create API owner" }
+if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to add owner to API app registration" }
 
-Read-Host "Check Azure Portal or CLI to confirm Entra ID app registration of $apiAppId, then press Enter to continue..."
+# Wait for propagation
+Wait-ForAppRegistration -AppId $apiAppId -AppName "API"
 
-# Create a client secret for API
+# Create client secret for API
+Write-Host "Creating client secret for API app..."
 $apiSecret = az ad app credential reset --id $apiAppId --append --query password -o tsv
-if ($LASTEXITCODE -ne 0 -or -not $apiSecret) { throw "Failed to create API app secret" }
+if ($LASTEXITCODE -ne 0 -or -not $apiSecret -or $apiSecret -eq "") { 
+    throw "Failed to create API app client secret" 
+}
 
-Read-Host "Check Azure Portal or CLI to confirm client secret starts with: $($apiSecret.Substring(0,3)), then press Enter to continue..."
+Write-Host "API Secret created (starts with: $($apiSecret.Substring(0,8))...)" -ForegroundColor Green
 
-# Add API scope (User.Write) to API app registration
+# Set API identifier URI
 $apiScopeUri = "api://$apiAppId"
+Write-Host "Setting API identifier URI: $apiScopeUri"
 az ad app update --id $apiAppId --identifier-uris $apiScopeUri
 if ($LASTEXITCODE -ne 0) { throw "Failed to set API identifier URI" }
-Read-Host "Check Azure Portal or CLI to confirm Application ID URI is $apiScopeUri, then press Enter to continue..."
 
-# Get the object ID of your app registration
+# Add API scope using simplified approach
+Write-Host "Adding custom API scope: $API_SCOPE_NAME"
+
+# Get app object ID for REST operations
 $appObjectId = az ad app show --id $apiAppId --query id -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $appObjectId) { throw "Failed to get API app object ID" }
 
-# Build the JSON for the new scope
-$scope = @{
+# Create scope definition
+$scopeDefinition = @{
     id = $API_SCOPE_GUID
     type = "User"
     value = $API_SCOPE_NAME
     adminConsentDisplayName = "Update user profile"
-    adminConsentDescription = "Allows updating user profile via the API"
+    adminConsentDescription = "Allows the application to update user profile information on behalf of the signed-in user"
+    userConsentDisplayName = "Update your profile"
+    userConsentDescription = "Allow the application to update your profile information"
     isEnabled = $true
+} | ConvertTo-Json -Compress
+
+$apiUpdate = @{
+    api = @{
+        oauth2PermissionScopes = @(
+            ($scopeDefinition | ConvertFrom-Json)
+        )
+    }
+} | ConvertTo-Json -Compress -Depth 5
+
+# Create temporary file for REST call
+$tempFile = "temp-api-scope.json"
+$apiUpdate | Out-File -FilePath $tempFile -Encoding UTF8 -NoNewline
+
+try {
+    az rest --method PATCH `
+        --url "https://graph.microsoft.com/v1.0/applications/$appObjectId" `
+        --headers "Content-Type=application/json" `
+        --body "@$tempFile"
+    
+    if ($LASTEXITCODE -ne 0) { throw "Failed to add API scope via REST call" }
+    Write-Host "API scope '$API_SCOPE_NAME' added successfully" -ForegroundColor Green
+}
+finally {
+    Remove-Item $tempFile -ErrorAction SilentlyContinue
 }
 
-$bodyObject = @{
-    api = @{
-        oauth2PermissionScopes = @($scope)
+# Add Microsoft Graph permissions to API (for OBO flow)
+Write-Host "Adding Microsoft Graph permissions to API app..."
+Add-GraphDelegatedPermission -AppId $apiAppId -PermissionName "User.ReadWrite"
+
+# --- CREATE WEB APP REGISTRATION ---
+Write-Host "Creating Web App Registration: $WEB_APP_DISPLAY_NAME" -ForegroundColor Cyan
+
+$webAppId = az ad app create --display-name "$WEB_APP_DISPLAY_NAME" --query appId -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $webAppId -or $webAppId -eq "") { 
+    throw "Failed to create Web app registration" 
+}
+
+Write-Host "Web App ID: $webAppId" -ForegroundColor Green
+
+# Add owner
+az ad app owner add --id $webAppId --owner-object-id $OWNER_OBJECT_ID
+if ($LASTEXITCODE -ne 0) { Write-Warning "Failed to add owner to Web app registration" }
+
+# Wait for propagation
+Wait-ForAppRegistration -AppId $webAppId -AppName "Web App"
+
+# Create client secret for Web App
+Write-Host "Creating client secret for Web app..."
+$webSecret = az ad app credential reset --id $webAppId --append --query password -o tsv
+if ($LASTEXITCODE -ne 0 -or -not $webSecret -or $webSecret -eq "") { 
+    throw "Failed to create Web app client secret" 
+}
+
+Write-Host "Web App Secret created (starts with: $($webSecret.Substring(0,8))...)" -ForegroundColor Green
+
+# Add redirect URIs
+Write-Host "Adding redirect URIs to Web app..."
+az ad app update --id $webAppId --web-redirect-uris "$WEB_REDIRECT_URI"
+if ($LASTEXITCODE -ne 0) { throw "Failed to add redirect URIs to Web app" }
+
+# --- CONFIGURE WEB APP PERMISSIONS ---
+Write-Host "Configuring Web App permissions..." -ForegroundColor Cyan
+
+# Add permission for custom API scope
+Write-Host "Adding custom API permission to Web app..."
+az ad app permission add --id $webAppId --api $apiAppId --api-permissions "$API_SCOPE_GUID=Scope"
+if ($LASTEXITCODE -ne 0) { throw "Failed to add custom API permission to Web app" }
+
+# Add Microsoft Graph permission
+Write-Host "Adding Microsoft Graph permission to Web app..."
+Add-GraphDelegatedPermission -AppId $webAppId -PermissionName "User.ReadWrite"
+
+# --- ADMIN CONSENT ---
+Write-Host "Checking admin consent capabilities..." -ForegroundColor Yellow
+
+$hasAdminPermissions = Test-AdminConsentPermissions
+
+# Track consent results
+$webAppConsentSuccess = $false
+$apiAppConsentSuccess = $false
+
+if ($hasAdminPermissions) {
+    Write-Host "Admin permissions detected. Attempting admin consent..." -ForegroundColor Green
+    
+    # Grant consent for API app first (usually more reliable)
+    Write-Host "Granting admin consent for API app permissions..."
+    az ad app permission admin-consent --id $apiAppId 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "✓ API app admin consent granted successfully" -ForegroundColor Green
+        $apiAppConsentSuccess = $true
+    } else {
+        Write-Warning "Failed to grant admin consent for API app automatically"
+    }
+    
+    # Grant consent for Web app
+    Write-Host "Granting admin consent for Web app permissions..."
+    az ad app permission admin-consent --id $webAppId 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "✓ Web app admin consent granted successfully" -ForegroundColor Green
+        $webAppConsentSuccess = $true
+    } else {
+        Write-Warning "Failed to grant admin consent for Web app automatically"
+        Write-Host "This may be due to tenant licensing limitations" -ForegroundColor Yellow
     }
 }
 
-# Convert to JSON and save to a temporary file
-$body = $bodyObject | ConvertTo-Json -Compress -Depth 5
-$tempFile = "temp-scope-update.json"
-$body | Out-File -FilePath $tempFile -Encoding UTF8 -NoNewline
+# Always provide manual instructions if automatic consent failed
+if (-not $webAppConsentSuccess -or -not $apiAppConsentSuccess -or -not $hasAdminPermissions) {
+    Write-Host ""
+    Write-Warning "⚠️  MANUAL ADMIN CONSENT REQUIRED" 
+    Write-Host ""
+    Write-Host "REQUIRED MANUAL STEPS:" -ForegroundColor Red
+    Write-Host "1. Open Azure Portal: https://portal.azure.com"
+    Write-Host "2. Navigate to: Azure Active Directory > App registrations"
+    Write-Warning "⚠️ "     
+    Write-Warning "⚠️  Do steps 3 and 4 in the order shown (API first)" 
+    Write-Warning "⚠️  " 
+    
+    if (-not $apiAppConsentSuccess) {
+        Write-Host "3. For '$API_APP_DISPLAY_NAME' (ID: $apiAppId):"
+        Write-Host "   - Click on the app registration"
+        Write-Host "   - Go to 'API permissions'"
+        Write-Host "   - Click 'Grant admin consent for $tenantDisplayName'"
+        Write-Host "   - Confirm the action"
+        Write-Host "   - Verify Microsoft Graph permission shows 'Granted' status"
+    }
 
-Write-Host "JSON Body: $body"
+    if (-not $webAppConsentSuccess) {
+        Write-Host "4. For '$WEB_APP_DISPLAY_NAME' (ID: $webAppId):"
+        Write-Host "   - Click on the app registration"
+        Write-Host "   - Go to 'API permissions'"
+        Write-Host "   - Click 'Grant admin consent for $tenantDisplayName'"
+        Write-Host "   - Confirm the action"
+        Write-Host "   - Verify both permissions show 'Granted' status"
+    }
 
-# Use the file-based approach for the REST call
-az rest --method PATCH `
-  --url "https://graph.microsoft.com/v1.0/applications/$appObjectId" `
-  --headers "Content-Type=application/json" `
-  --body "@$tempFile"
-
-# Clean up the temporary file
-Remove-Item $tempFile -ErrorAction SilentlyContinue
-if ($LASTEXITCODE -ne 0) { 
-    throw "Failed to add API scope" 
+    Write-Host ""
+    Write-Host "TROUBLESHOOTING TIPS:" -ForegroundColor Cyan
+    Write-Host "- If you see licensing errors, try granting consent from Enterprise Applications instead"
+    Write-Host "- Some tenants require consent to be granted by a different admin role"
+    Write-Host "- Wait 2-3 minutes after granting consent before proceeding to next steps"
+    Write-Host ""
 }
 
-Read-Host "Check Azure Portal or CLI to confirm app permissions updated, then press Enter to continue..."
+# --- GENERATE CONFIGURATION OUTPUT ---
+$tenantId = az account show --query tenantId -o tsv
 
-# --- Web App Registration ---
-Write-Host "Creating or updating Web App Registration: $WEB_APP_NAME"
-
-$existingWebApp = az ad app list --display-name "$WEB_APP_DISPLAY_NAME" --query "[0].appId" -o tsv
-if ($existingWebApp) {
-    Write-Host "Deleting existing Web app registration $existingWebApp"
-    az ad app delete --id $existingWebApp
-}
-
-# Create Web App Registration
-$webAppId = az ad app create --display-name "$WEB_APP_DISPLAY_NAME" --query appId -o tsv
-if ($LASTEXITCODE -ne 0 -or -not $webAppId) { throw "Failed to create Web app registration" }
-
-az ad app owner add --id $webAppId --owner-object-id $OWNER_OBJECT_ID
-if ($LASTEXITCODE -ne 0 ) { throw "Failed to create Web app owner" }
-
-Read-Host "Check Azure Portal or CLI to confirm Entra ID app registration of $webAppId, then press Enter to continue..."
-
-# Create a client secret for Web
-$webSecret = az ad app credential reset --id $webAppId --append --query password -o tsv
-if ($LASTEXITCODE -ne 0 -or -not $webSecret) { throw "Failed to create Web app secret" }
-
-Read-Host "Check Azure Portal or CLI to confirm client secret starts with: $($webSecret.Substring(0,3)), then press Enter to continue..."
-
-# Add redirect URIs
-az ad app update --id $webAppId --web-redirect-uris "$WEB_REDIRECT_URI"
-if ($LASTEXITCODE -ne 0) { throw "Failed to update Web app redirect URIs" }
-Read-Host "Check Azure Portal or CLI to confirm Application ID URI is $WEB_REDIRECT_URI, then press Enter to continue..."
-
-# --- Permissions: Grant Web App permission to call API (custom scope) and Microsoft Graph ---
-Write-Host "Configuring Web App API permissions..."
-
-# Add permission for custom API scope
-az ad app permission add --id $webAppId --api $apiAppId --api-permissions "$API_SCOPE_GUID=Scope"
-if ($LASTEXITCODE -ne 0) { throw "Failed to add API permission to Web app" }
-Read-Host "Check Azure Portal or CLI to confirm Add permission for custom API scope, then press Enter to continue..."
-
-# Add MS Graph User.ReadWrite permission
-az ad app permission add --id $webAppId --api $MICROSOFT_GRAPH_APP_ID --api-permissions "$($GRAPH_DELEGATED['User.ReadWrite'])=Scope"
-if ($LASTEXITCODE -ne 0) { throw "Failed to add Graph permission to Web app" }
-Read-Host "Check Azure Portal: Web App > API permissions - confirm 'Microsoft Graph User.ReadWrite' is listed, then press Enter to continue..."
-
-# skip this section for now. 
-# Grant admin consent for all permissions (if you have permissions to do so)  
-# Write-Host "Granting admin consent for Web app permissions (requires admin)..."
-# az ad app permission admin-consent --id $webAppId
-# if ($LASTEXITCODE -ne 0) { throw "Failed Granting admin consent for Web app permissions" }
-# Read-Host "Check Azure Portal: Web App > API permissions - confirm Status shows 'Granted' (green checkmarks), then press Enter to continue..."
-
-# --- Expose API permissions for the API App ---
-Write-Host "Exposing API permissions on API app..."
-
-# Add MS Graph delegated permissions to API app (so it can acquire tokens OBO)
-az ad app permission add --id $apiAppId --api $MICROSOFT_GRAPH_APP_ID --api-permissions "$($GRAPH_DELEGATED['User.ReadWrite'])=Scope"
-if ($LASTEXITCODE -ne 0) { throw "Failed Add MS Graph delegated permissions to API app (so it can acquire tokens OBO)" }
-Read-Host "Check Azure Portal: API App > API permissions - confirm 'Microsoft Graph User.ReadWrite' is listed, then press Enter to continue..."
-
-# skip this section for now. 
-# Grant admin consent for API app (so OBO works)
-# az ad app permission admin-consent --id $apiAppId
-# if ($LASTEXITCODE -ne 0) { throw "Failed Grant admin consent for API app (so OBO works)" }
-# Read-Host "Check Azure Portal: API App > API permissions - confirm Status shows 'Granted' for Microsoft Graph permission, then press Enter to continue..."
-
-# --- Output configuration ---
 $configOutput = @"
-# Generated App Registration IDs
+# Generated App Registration Configuration
+# Created: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+
 `$WEB_APP_ID = "$webAppId"
 `$API_APP_ID = "$apiAppId"
 `$WEB_APP_SECRET = "$webSecret"
 `$API_APP_SECRET = "$apiSecret"
 `$API_SCOPE_URI = "$apiScopeUri/$API_SCOPE_NAME"
-`$TENANT_ID = "$((az account show --query tenantId -o tsv))"
-"@
-$configOutput | Out-File -FilePath "app-config.ps1" -Encoding UTF8
-if ($LASTEXITCODE -ne 0) { throw "Failed Output configuration" }
+`$TENANT_ID = "$tenantId"
 
-Write-Host "App registrations created successfully!" -ForegroundColor Green
-Write-Host "Configuration saved to app-config.ps1" -ForegroundColor Green
+# For verification
+`$WEB_APP_DISPLAY_NAME = "$WEB_APP_DISPLAY_NAME"
+`$API_APP_DISPLAY_NAME = "$API_APP_DISPLAY_NAME"
+"@
+
+$configOutput | Out-File -FilePath "app-config.ps1" -Encoding UTF8
+
+# --- SUMMARY ---
+Write-Host ""
+Write-Host "=== APP REGISTRATION SUMMARY ===" -ForegroundColor Green
+Write-Host "✓ API App Registration: $apiAppId ($API_APP_DISPLAY_NAME)"
+Write-Host "✓ Web App Registration: $webAppId ($WEB_APP_DISPLAY_NAME)"
+Write-Host "✓ Client secrets created for both applications"
+Write-Host "✓ Custom API scope '$API_SCOPE_NAME' configured"
+Write-Host "✓ Microsoft Graph permissions added"
+Write-Host "✓ Configuration saved to app-config.ps1"
+
+# Admin consent status
+if ($apiAppConsentSuccess -and $webAppConsentSuccess) {
+    Write-Host "✓ Admin consent granted automatically for both apps" -ForegroundColor Green
+} elseif ($apiAppConsentSuccess -or $webAppConsentSuccess) {
+    Write-Host "⚠️  Partial admin consent granted - manual steps required above" -ForegroundColor Yellow
+} else {
+    Write-Host "⚠️  Manual admin consent required for both apps (see instructions above)" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "BEFORE PROCEEDING TO NEXT STEPS:" -ForegroundColor Red
+Write-Host "1. Complete any pending manual admin consent steps above"
+Write-Host "2. Verify consent status in Azure Portal"
+Write-Host "3. Run verification commands below to confirm"
+Write-Host ""
+
+Write-Host "Next Steps (only after admin consent is complete):"
+Write-Host "1. Run 02-init-web-app.ps1 to create the web application"
+Write-Host "2. Verify configuration in Azure Portal"
+Write-Host ""
+
+# --- VERIFICATION COMMANDS ---
+Write-Host "Verification Commands:" -ForegroundColor Cyan
+Write-Host "az ad app show --id $webAppId --query '{displayName:displayName, appId:appId}'"
+Write-Host "az ad app show --id $apiAppId --query '{displayName:displayName, appId:appId}'"
+Write-Host "az ad app permission list --id $webAppId"
+Write-Host "az ad app permission list --id $apiAppId"
 ```
 
 ---
